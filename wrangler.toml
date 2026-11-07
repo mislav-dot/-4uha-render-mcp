@@ -2,6 +2,8 @@ name = "4uha-render-mcp"
 main = "src/index.js"
 compatibility_date = "2026-10-01"
 compatibility_flags = ["nodejs_compat"]
+# Ne briši varijable dodane u Cloudflare dashboardu pri svakom deployu iz GitHuba
+keep_vars = true
 
 [[r2_buckets]]
 binding = "RENDERS"
