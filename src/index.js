@@ -9,7 +9,7 @@
 
 import { Buffer } from "node:buffer";
 
-const SERVER_INFO = { name: "4uha-render", version: "1.0.1" };
+const SERVER_INFO = { name: "4uha-render", version: "1.0.2" };
 const MAX_INLINE_B64 = 1_400_000; // veće slike Claudeu šaljemo samo kao link
 const SIZES = { landscape: "1536x1024", portrait: "1024x1536", square: "1024x1024" };
 const XAI_ASPECT = { landscape: "3:2", portrait: "2:3", square: "1:1" };
@@ -39,6 +39,18 @@ export default {
       // Samo korijen vraća 200. Sve ostalo (npr. /.well-known/oauth-*) mora biti 404,
       // inače Claude misli da server traži OAuth prijavu i spajanje konektora pada.
       if (parts.length === 0) return new Response("4 UHA Render MCP", { status: 200 });
+      if (parts[0] === "status" && parts.length === 1) {
+        // Dijagnostika bez otkrivanja tajni: samo postoji li i kolika je duljina.
+        const t = cleanSecret(env.ACCESS_TOKEN);
+        return json({
+          version: SERVER_INFO.version,
+          ACCESS_TOKEN: t ? `postavljen, ${t.length} znakova, počinje s "${t.slice(0, 3)}"` : "NIJE postavljen",
+          ACCESS_TOKEN_sirovo: env.ACCESS_TOKEN ? `${String(env.ACCESS_TOKEN).length} znakova prije čišćenja` : "-",
+          OPENAI_API_KEY: env.OPENAI_API_KEY ? `postavljen, počinje s "${cleanSecret(env.OPENAI_API_KEY).slice(0, 7)}"` : "NIJE postavljen",
+          XAI_API_KEY: env.XAI_API_KEY ? "postavljen" : "nije postavljen (opcionalno)",
+          R2: env.RENDERS ? "spojen" : "NIJE spojen",
+        });
+      }
       return new Response("Not found", { status: 404 });
     } catch (e) {
       return new Response(`Greška: ${e.message}`, { status: 500 });
@@ -48,10 +60,15 @@ export default {
 
 // ---------- pomoćne ----------
 
+function cleanSecret(v) {
+  return String(v || "").trim().replace(/^["'`]+|["'`]+$/g, "").trim();
+}
+
 function checkToken(env, token) {
-  if (!env.ACCESS_TOKEN || !token) return false;
-  const a = new TextEncoder().encode(env.ACCESS_TOKEN);
-  const b = new TextEncoder().encode(token);
+  const expected = cleanSecret(env.ACCESS_TOKEN);
+  if (!expected || !token) return false;
+  const a = new TextEncoder().encode(expected);
+  const b = new TextEncoder().encode(cleanSecret(decodeURIComponent(token)));
   if (a.length !== b.length) return false;
   let diff = 0;
   for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
@@ -177,12 +194,12 @@ async function openaiRender(env, { prompt, refs, aspect, quality, n }) {
     for (const [k, v] of Object.entries(common)) fd.append(k, String(v));
     for (const r of refs) fd.append("image[]", new Blob([r.bytes], { type: r.type }), r.name);
     res = await fetch("https://api.openai.com/v1/images/edits", {
-      method: "POST", headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` }, body: fd,
+      method: "POST", headers: { Authorization: `Bearer ${cleanSecret(env.OPENAI_API_KEY)}` }, body: fd,
     });
   } else {
     res = await fetch("https://api.openai.com/v1/images/generations", {
       method: "POST",
-      headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
+      headers: { Authorization: `Bearer ${cleanSecret(env.OPENAI_API_KEY)}`, "Content-Type": "application/json" },
       body: JSON.stringify({ model, prompt, ...common }),
     });
   }
@@ -205,7 +222,7 @@ async function xaiRender(env, { prompt, refs, aspect, n }) {
 
   const call = (payload) => fetch(`https://api.x.ai/v1/images/${endpoint}`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${env.XAI_API_KEY}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${cleanSecret(env.XAI_API_KEY)}`, "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
   let res = await call({ ...body, ...optional });
