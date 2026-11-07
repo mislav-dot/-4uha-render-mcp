@@ -30,6 +30,7 @@ export default {
         if (request.method === "POST") return handleUpload(request, env, base);
       }
       if (parts[0] === "mcp") {
+        if (parts.length !== 2) return new Response("Not found", { status: 404 });
         if (!checkToken(env, parts[1])) return new Response("Unauthorized", { status: 401 });
         if (request.method === "POST") return handleMcp(request, env, base, parts[1]);
         if (request.method === "DELETE") return new Response(null, { status: 204 });
