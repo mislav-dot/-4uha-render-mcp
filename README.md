@@ -16,7 +16,7 @@ Radi na Cloudflare Workers, a podloge i gotove rendere sprema u R2 bucket `4uha-
 2. **Workers & Pages → Create → Import a repository**: odaberi ovaj repo. Worker se mora zvati `4uha-render-mcp`. Deploy.
 3. **Worker → Settings → Variables and Secrets** → dodaj kao *Secret*:
    - `OPENAI_API_KEY`: ključ s platform.openai.com
-   - `XAI_API_KEY`: ključ s console.x.ai
+   - `XAI_API_KEY`: ključ s console.x.ai (opcionalno; bez njega radi samo OpenAI)
    - `ACCESS_TOKEN`: dugi nasumični niz (lozinka konektora)
 4. **Claude → postavke konektora → Add custom connector**
    - Naziv: `4UHA Render`

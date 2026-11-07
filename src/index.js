@@ -245,7 +245,7 @@ const TOOLS = [
       type: "object",
       properties: {
         prompt: { type: "string", description: "Detaljan opis rendera: materijali, svjetlo, doba dana, okoliš, kadar, stil. Na engleskom daje najbolje rezultate." },
-        provider: { type: "string", enum: ["openai", "xai", "both"], default: "both", description: "Koji servis; 'both' za usporedbu." },
+        provider: { type: "string", enum: ["openai", "xai", "both"], default: "openai", description: "Koji servis; zadano OpenAI. 'both' za usporedbu (preskače servis bez API ključa)." },
         reference_ids: { type: "array", items: { type: "string" }, description: "ID-evi uploada (iz list_uploads) ili https URL-ovi podloga. OpenAI prima više, Grok koristi prvu." },
         aspect: { type: "string", enum: ["landscape", "portrait", "square"], default: "landscape" },
         quality: { type: "string", enum: ["low", "medium", "high"], default: "high", description: "Samo OpenAI. 'low' za brze skice." },
@@ -282,7 +282,7 @@ async function callTool(name, args, env, base, token) {
   if (name === "render_image") {
     const prompt = String(args.prompt || "").trim();
     if (!prompt) throw new Error("Prompt je obavezan.");
-    const provider = args.provider || "both";
+    const provider = args.provider || env.DEFAULT_PROVIDER || "openai";
     const aspect = SIZES[args.aspect] ? args.aspect : "landscape";
     const quality = ["low", "medium", "high"].includes(args.quality) ? args.quality : "high";
     const n = Math.min(Math.max(parseInt(args.n || 1, 10) || 1, 1), 4);
@@ -290,8 +290,11 @@ async function callTool(name, args, env, base, token) {
     const opts = { prompt, refs, aspect, quality, n };
 
     const jobs = [];
-    if (provider === "openai" || provider === "both") jobs.push(["OpenAI", openaiRender(env, opts)]);
-    if (provider === "xai" || provider === "both") jobs.push(["Grok", xaiRender(env, opts)]);
+    const skipped = [];
+    const want = (p, key) => provider === p || (provider === "both" && (env[key] || (skipped.push(p), false)));
+    if (want("openai", "OPENAI_API_KEY")) jobs.push(["OpenAI", openaiRender(env, opts)]);
+    if (want("xai", "XAI_API_KEY")) jobs.push(["Grok", xaiRender(env, opts)]);
+    if (!jobs.length) throw new Error("Nijedan servis nema postavljen API ključ.");
     const settled = await Promise.allSettled(jobs.map((j) => j[1]));
 
     const day = new Date().toISOString().slice(0, 10);
@@ -315,6 +318,7 @@ async function callTool(name, args, env, base, token) {
         }
       }
     }
+    if (skipped.length) summary.push(`Preskočeno (nema API ključa): ${skipped.join(", ")}`);
     content.unshift({ type: "text", text: `Rezultati (linkovi za preuzimanje):\n${summary.join("\n")}` });
     const allFailed = settled.every((s) => s.status === "rejected");
     return { content, isError: allFailed };
