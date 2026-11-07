@@ -9,7 +9,7 @@
 
 import { Buffer } from "node:buffer";
 
-const SERVER_INFO = { name: "4uha-render", version: "1.1.0" };
+const SERVER_INFO = { name: "4uha-render", version: "1.1.1" };
 const MAX_INLINE_B64 = 1_400_000; // veće slike Claudeu šaljemo samo kao link
 // "wide" = 16:9 kao ArchiCAD/Twinmotion podloge (1920x1080) — da model ne re-komponira kadar.
 const SIZES = { landscape: "1536x1024", portrait: "1024x1536", square: "1024x1024", wide: "2048x1152" };
@@ -159,13 +159,17 @@ async function listUploads(env, limit) {
 
 async function resolveReference(env, ref) {
   ref = String(ref).trim();
-  if (/^https?:\/\//.test(ref)) {
+  if (/^https?:\/\//.test(ref) && !/\/f\/renders\//.test(ref)) {
     const r = await fetch(ref);
     if (!r.ok) throw new Error(`Ne mogu dohvatiti referencu ${ref} (${r.status})`);
     const type = r.headers.get("content-type") || "image/png";
     return { bytes: new Uint8Array(await r.arrayBuffer()), type, name: "ref." + extFromType(type) };
   }
-  let key = ref.startsWith("uploads/") ? ref : null;
+  // Raniji render iz spremišta kao podloga (npr. odobreni dnevni render za noćnu verziju):
+  // puni link na /f/renders/... ili ključ "renders/...".
+  const own = ref.match(/\/f\/(renders\/[^?#]+)$/);
+  if (own) ref = own[1];
+  let key = /^(uploads|renders)\//.test(ref) ? ref : null;
   if (!key) {
     const res = await env.RENDERS.list({ prefix: `uploads/${ref}` });
     if (!res.objects.length) throw new Error(`Upload "${ref}" ne postoji. Pozovi list_uploads za popis.`);
@@ -294,7 +298,7 @@ const TOOLS = [
       properties: {
         prompt: { type: "string", description: "Detaljan opis rendera: materijali, svjetlo, doba dana, okoliš, kadar, stil. Na engleskom daje najbolje rezultate." },
         provider: { type: "string", enum: ["openai", "xai", "both"], default: "openai", description: "Koji servis; zadano OpenAI. 'both' za usporedbu (preskače servis bez API ključa)." },
-        reference_ids: { type: "array", items: { type: "string" }, description: "ID-evi uploada (iz list_uploads) ili https URL-ovi podloga. Za render iz podloge šalji SAMO podlogu — dodatne slike (npr. Google Maps) model lijepi u scenu i mijenja kadar." },
+        reference_ids: { type: "array", items: { type: "string" }, description: "ID-evi uploada (iz list_uploads), link ili ključ ranijeg rendera (renders/...) ili https URL-ovi podloga. Za render iz podloge šalji SAMO podlogu — dodatne slike (npr. Google Maps) model lijepi u scenu i mijenja kadar." },
         aspect: { type: "string", enum: ["landscape", "portrait", "square", "wide"], default: "landscape", description: "'wide' = 16:9 (2048x1152) — za podloge iz ArchiCAD-a/Twinmotiona 1920x1080; omjer izlaza MORA odgovarati podlozi, inače model re-komponira kadar." },
         size: { type: "string", description: "Opcionalno, točna veličina 'ŠxV' (višekratnici od 16) ili 'auto'; ima prednost pred aspect." },
         mask_id: { type: "string", description: "Opcionalno, ID uploadane PNG maske iste veličine kao prva podloga: PROZIRNI pikseli = smije se mijenjati, NEPROZIRNI = zaključano (zgrada). Samo OpenAI." },
