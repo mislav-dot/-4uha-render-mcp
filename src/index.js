@@ -9,7 +9,7 @@
 
 import { Buffer } from "node:buffer";
 
-const SERVER_INFO = { name: "4uha-render", version: "1.0.0" };
+const SERVER_INFO = { name: "4uha-render", version: "1.0.1" };
 const MAX_INLINE_B64 = 1_400_000; // veće slike Claudeu šaljemo samo kao link
 const SIZES = { landscape: "1536x1024", portrait: "1024x1536", square: "1024x1024" };
 const XAI_ASPECT = { landscape: "3:2", portrait: "2:3", square: "1:1" };
@@ -35,7 +35,10 @@ export default {
         if (request.method === "DELETE") return new Response(null, { status: 204 });
         return new Response("Method Not Allowed", { status: 405, headers: { Allow: "POST" } });
       }
-      return new Response("4 UHA Render MCP", { status: 200 });
+      // Samo korijen vraća 200. Sve ostalo (npr. /.well-known/oauth-*) mora biti 404,
+      // inače Claude misli da server traži OAuth prijavu i spajanje konektora pada.
+      if (parts.length === 0) return new Response("4 UHA Render MCP", { status: 200 });
+      return new Response("Not found", { status: 404 });
     } catch (e) {
       return new Response(`Greška: ${e.message}`, { status: 500 });
     }
