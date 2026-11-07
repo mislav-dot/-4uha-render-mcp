@@ -1,0 +1,13 @@
+{
+  "name": "4uha-render-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "4 UHA - MCP konektor za rendere (OpenAI + xAI Grok) na Cloudflare Workers",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
