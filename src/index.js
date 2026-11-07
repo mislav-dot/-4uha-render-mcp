@@ -9,10 +9,12 @@
 
 import { Buffer } from "node:buffer";
 
-const SERVER_INFO = { name: "4uha-render", version: "1.0.2" };
+const SERVER_INFO = { name: "4uha-render", version: "1.1.0" };
 const MAX_INLINE_B64 = 1_400_000; // veće slike Claudeu šaljemo samo kao link
-const SIZES = { landscape: "1536x1024", portrait: "1024x1536", square: "1024x1024" };
-const XAI_ASPECT = { landscape: "3:2", portrait: "2:3", square: "1:1" };
+// "wide" = 16:9 kao ArchiCAD/Twinmotion podloge (1920x1080) — da model ne re-komponira kadar.
+const SIZES = { landscape: "1536x1024", portrait: "1024x1536", square: "1024x1024", wide: "2048x1152" };
+const XAI_ASPECT = { landscape: "3:2", portrait: "2:3", square: "1:1", wide: "16:9" };
+const MAX_B64_UPLOAD = 2_000_000; // upload_image: maske i manje slike iz Claudea
 
 export default {
   async fetch(request, env) {
@@ -137,12 +139,7 @@ async function handleUpload(request, env, base) {
   const rows = [];
   for (const f of files) {
     if (f.size > 20 * 1024 * 1024) { rows.push(`${escapeHtml(f.name)}: prevelika datoteka`); continue; }
-    const id = crypto.randomUUID().slice(0, 13);
-    const key = `uploads/${id}.${extFromType(f.type)}`;
-    await env.RENDERS.put(key, await f.arrayBuffer(), {
-      httpMetadata: { contentType: f.type || "application/octet-stream" },
-      customMetadata: { name: f.name, label, uploaded: new Date().toISOString() },
-    });
+    const { id, key } = await storeUpload(env, await f.arrayBuffer(), f.type || "application/octet-stream", f.name, label);
     rows.push(`<code>${id}</code> — ${escapeHtml(f.name)} — <a href="${base}/f/${key}" target="_blank">pogledaj</a>`);
   }
   return html(uploadPage(`<div class="ok"><b>Spremljeno:</b><br>${rows.join("<br>")}</div>`));
@@ -180,32 +177,62 @@ async function resolveReference(env, ref) {
   return { bytes: new Uint8Array(await obj.arrayBuffer()), type, name: key.split("/").pop() };
 }
 
+async function storeUpload(env, bytes, type, name, label) {
+  const id = crypto.randomUUID().slice(0, 13);
+  const key = `uploads/${id}.${extFromType(type)}`;
+  await env.RENDERS.put(key, bytes, {
+    httpMetadata: { contentType: type },
+    customMetadata: { name, label, uploaded: new Date().toISOString() },
+  });
+  return { id, key };
+}
+
 // ---------- providers ----------
 
-async function openaiRender(env, { prompt, refs, aspect, quality, n }) {
+async function openaiRender(env, { prompt, refs, mask, aspect, size, quality, n, fidelity }) {
   if (!env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY nije postavljen u Cloudflareu.");
   const model = env.OPENAI_IMAGE_MODEL || "gpt-image-2";
-  const common = { size: SIZES[aspect], quality, n, output_format: "jpeg", output_compression: 88 };
-  let res;
-  if (refs.length) {
-    const fd = new FormData();
-    fd.append("model", model);
-    fd.append("prompt", prompt);
-    for (const [k, v] of Object.entries(common)) fd.append(k, String(v));
-    for (const r of refs) fd.append("image[]", new Blob([r.bytes], { type: r.type }), r.name);
-    res = await fetch("https://api.openai.com/v1/images/edits", {
-      method: "POST", headers: { Authorization: `Bearer ${cleanSecret(env.OPENAI_API_KEY)}` }, body: fd,
-    });
-  } else {
-    res = await fetch("https://api.openai.com/v1/images/generations", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${cleanSecret(env.OPENAI_API_KEY)}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, prompt, ...common }),
-    });
+  const auth = { Authorization: `Bearer ${cleanSecret(env.OPENAI_API_KEY)}` };
+  const wantSize = size || SIZES[aspect];
+
+  // Pokušaji od najstrožeg prema blažem: ako API ne prihvati veličinu ili input_fidelity (400),
+  // ponovi bez toga i to izričito javi — nikad tiho.
+  const attempts = [{ size: wantSize, fidelity }];
+  if (fidelity) attempts.push({ size: wantSize, fidelity: null, note: "API nije prihvatio input_fidelity" });
+  if (wantSize !== "auto") attempts.push({ size: "auto", fidelity, note: `API nije prihvatio veličinu ${wantSize}, korišteno 'auto'` });
+  if (fidelity && wantSize !== "auto") attempts.push({ size: "auto", fidelity: null, note: `API nije prihvatio veličinu ${wantSize} ni input_fidelity` });
+
+  let lastErr;
+  for (const a of attempts) {
+    const common = { size: a.size, quality, n, output_format: "jpeg", output_compression: 88 };
+    let res;
+    if (refs.length) {
+      const fd = new FormData();
+      fd.append("model", model);
+      fd.append("prompt", prompt);
+      for (const [k, v] of Object.entries(common)) fd.append(k, String(v));
+      if (a.fidelity) fd.append("input_fidelity", a.fidelity);
+      for (const r of refs) fd.append("image[]", new Blob([r.bytes], { type: r.type }), r.name);
+      if (mask) fd.append("mask", new Blob([mask.bytes], { type: "image/png" }), "mask.png");
+      res = await fetch("https://api.openai.com/v1/images/edits", { method: "POST", headers: auth, body: fd });
+    } else {
+      res = await fetch("https://api.openai.com/v1/images/generations", {
+        method: "POST",
+        headers: { ...auth, "Content-Type": "application/json" },
+        body: JSON.stringify({ model, prompt, ...common }),
+      });
+    }
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      const imgs = await Promise.all((data.data || []).map((d) => toImage(d, "image/jpeg")));
+      const note = [a.note, `veličina=${a.size}`, a.fidelity ? `input_fidelity=${a.fidelity}` : null, mask ? "maska=da" : null]
+        .filter(Boolean).join("; ");
+      return imgs.map((i) => ({ ...i, note }));
+    }
+    lastErr = `OpenAI ${res.status}: ${data?.error?.message || JSON.stringify(data).slice(0, 300)}`;
+    if (res.status !== 400) break; // samo 400 (neprihvaćen parametar) pokušavamo blaže
   }
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`OpenAI ${res.status}: ${data?.error?.message || JSON.stringify(data).slice(0, 300)}`);
-  return Promise.all((data.data || []).map((d) => toImage(d, "image/jpeg")));
+  throw new Error(lastErr);
 }
 
 async function xaiRender(env, { prompt, refs, aspect, n }) {
@@ -267,13 +294,29 @@ const TOOLS = [
       properties: {
         prompt: { type: "string", description: "Detaljan opis rendera: materijali, svjetlo, doba dana, okoliš, kadar, stil. Na engleskom daje najbolje rezultate." },
         provider: { type: "string", enum: ["openai", "xai", "both"], default: "openai", description: "Koji servis; zadano OpenAI. 'both' za usporedbu (preskače servis bez API ključa)." },
-        reference_ids: { type: "array", items: { type: "string" }, description: "ID-evi uploada (iz list_uploads) ili https URL-ovi podloga. OpenAI prima više, Grok koristi prvu." },
-        aspect: { type: "string", enum: ["landscape", "portrait", "square"], default: "landscape" },
+        reference_ids: { type: "array", items: { type: "string" }, description: "ID-evi uploada (iz list_uploads) ili https URL-ovi podloga. Za render iz podloge šalji SAMO podlogu — dodatne slike (npr. Google Maps) model lijepi u scenu i mijenja kadar." },
+        aspect: { type: "string", enum: ["landscape", "portrait", "square", "wide"], default: "landscape", description: "'wide' = 16:9 (2048x1152) — za podloge iz ArchiCAD-a/Twinmotiona 1920x1080; omjer izlaza MORA odgovarati podlozi, inače model re-komponira kadar." },
+        size: { type: "string", description: "Opcionalno, točna veličina 'ŠxV' (višekratnici od 16) ili 'auto'; ima prednost pred aspect." },
+        mask_id: { type: "string", description: "Opcionalno, ID uploadane PNG maske iste veličine kao prva podloga: PROZIRNI pikseli = smije se mijenjati, NEPROZIRNI = zaključano (zgrada). Samo OpenAI." },
+        input_fidelity: { type: "string", enum: ["high", "low"], default: "high", description: "Samo OpenAI s referencama: 'high' = najveća vjernost podlozi (zadano)." },
         quality: { type: "string", enum: ["low", "medium", "high"], default: "high", description: "Samo OpenAI. 'low' za brze skice." },
         n: { type: "integer", minimum: 1, maximum: 4, default: 1, description: "Broj slika po servisu." },
         label: { type: "string", description: "Oznaka projekta za naziv datoteke, npr. A26-009." },
       },
       required: ["prompt"],
+    },
+  },
+  {
+    name: "upload_image",
+    description: "Sprema sliku poslanu kao base64 (npr. masku koju je Claude izradio) i vraća njezin ID za render_image (mask_id ili reference_ids). Do ~1,5 MB.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        data_base64: { type: "string", description: "Sadržaj slike u base64 (bez 'data:' prefiksa)." },
+        name: { type: "string", description: "Naziv datoteke, npr. A24-027_1_2_maska.png" },
+        label: { type: "string", description: "Oznaka projekta." },
+      },
+      required: ["data_base64"],
     },
   },
   {
@@ -300,6 +343,16 @@ async function callTool(name, args, env, base, token) {
     };
   }
 
+  if (name === "upload_image") {
+    const b64 = String(args.data_base64 || "").replace(/^data:[^,]*,/, "").replace(/\s+/g, "");
+    if (!b64) throw new Error("data_base64 je obavezan.");
+    if (b64.length > MAX_B64_UPLOAD) throw new Error("Slika je prevelika za upload_image; koristi stranicu za upload.");
+    const type = sniffType(b64);
+    if (!type) throw new Error("Nepoznat format slike (podržano PNG/JPG/WEBP).");
+    const { id, key } = await storeUpload(env, Buffer.from(b64, "base64"), type, String(args.name || `upload.${extFromType(type)}`), slug(args.label));
+    return { content: [{ type: "text", text: `Spremljeno: ${id} | ${base}/f/${key}` }] };
+  }
+
   if (name === "render_image") {
     const prompt = String(args.prompt || "").trim();
     if (!prompt) throw new Error("Prompt je obavezan.");
@@ -308,7 +361,11 @@ async function callTool(name, args, env, base, token) {
     const quality = ["low", "medium", "high"].includes(args.quality) ? args.quality : "high";
     const n = Math.min(Math.max(parseInt(args.n || 1, 10) || 1, 1), 4);
     const refs = await Promise.all((args.reference_ids || []).slice(0, 8).map((r) => resolveReference(env, r)));
-    const opts = { prompt, refs, aspect, quality, n };
+    const size = /^(auto|\d{3,4}x\d{3,4})$/.test(String(args.size || "")) ? String(args.size) : null;
+    const mask = args.mask_id ? await resolveReference(env, args.mask_id) : null;
+    if (mask && !refs.length) throw new Error("Maska se koristi samo uz podlogu (reference_ids).");
+    const fidelity = refs.length ? (args.input_fidelity === "low" ? "low" : "high") : null;
+    const opts = { prompt, refs, mask, aspect, size, quality, n, fidelity };
 
     const jobs = [];
     const skipped = [];
@@ -376,7 +433,8 @@ async function handleRpc(msg, env, base, token) {
         serverInfo: SERVER_INFO,
         instructions:
           "4 UHA alat za rendere. Za render iz podloge: korisnik uploada sliku na stranicu za upload (link daje list_uploads), " +
-          "zatim render_image s reference_ids. Uvijek usporedi rezultat s podlogom i upozori na odstupanja geometrije.",
+          "zatim render_image s reference_ids (SAMO podloga, aspect jednak podlozi — 'wide' za 16:9). Za zaključavanje zgrade: maska (upload_image → mask_id). " +
+          "Uvijek usporedi rezultat s podlogom i upozori na odstupanja geometrije; render s promijenjenom geometrijom se ne predaje.",
       });
     case "ping":
       return ok({});

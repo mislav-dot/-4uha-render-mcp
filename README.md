@@ -9,6 +9,16 @@ Radi na Cloudflare Workers, a podloge i gotove rendere sprema u R2 bucket `4uha-
 |---|---|
 | `render_image` | render iz teksta ili iz podloge (screenshot iz ArchiCAD-a, skica); `provider`: `openai`, `xai` ili `both` |
 | `list_uploads` | popis uploadanih podloga s ID-evima i link na stranicu za upload |
+| `upload_image` | sprema sliku poslanu iz Claudea (base64) — za maske koje Claude izradi |
+
+## Vjernost geometriji (v1.1)
+
+- `aspect: "wide"` (2048×1152, 16:9) — omjer izlaza mora biti jednak podlozi, inače model re-komponira kadar.
+- `input_fidelity: "high"` (zadano uz podlogu) — najveća vjernost podlozi.
+- `mask_id` — PNG maska iste veličine kao podloga: prozirno = smije se mijenjati, neprozirno = zaključano.
+- Uz podlogu ne slati dodatne slike (npr. Google Maps) — okolina se opisuje tekstom.
+- Ako API neki parametar ne prihvati, konektor pokuša blaže i to **izričito napiše** uz rezultat.
+- Kontrola geometrije prema podlozi i dalje je obavezna prije predaje.
 
 ## Postavljanje (jednom)
 
