@@ -12,6 +12,7 @@ bucket_name = "4uha-renders"
 [vars]
 OPENAI_IMAGE_MODEL = "gpt-image-2"
 XAI_IMAGE_MODEL = "grok-imagine-image-2.0"
+XAI_VIDEO_MODEL = "grok-imagine-video-1.5"
 DEFAULT_PROVIDER = "openai"   # "xai" ili "both" kad se doda XAI_API_KEY
 
 # Tajne (NE upisivati ovdje, nego u Cloudflare: Settings -> Variables and Secrets):

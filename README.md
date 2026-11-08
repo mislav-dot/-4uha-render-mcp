@@ -10,6 +10,8 @@ Radi na Cloudflare Workers, a podloge i gotove rendere sprema u R2 bucket `4uha-
 | `render_image` | render iz teksta ili iz podloge (screenshot iz ArchiCAD-a, skica); `provider`: `openai`, `xai` ili `both` |
 | `list_uploads` | popis uploadanih podloga s ID-evima i link na stranicu za upload |
 | `upload_image` | sprema sliku poslanu iz Claudea (base64) — za maske koje Claude izradi |
+| `render_video` | AI video (image-to-video, xAI Grok Imagine 1.5) iz prihvaćenog rendera; 1–15 s, 480p/720p/1080p; asinkrono → `job_id` |
+| `video_status` | provjera posla; kad je gotov, MP4 ide u R2 (`renders/<dan>/…mp4`) i vraća se trajni link (+ video kao prilog do ~9 MB) |
 
 ## Vjernost geometriji (v1.1)
 
@@ -19,6 +21,13 @@ Radi na Cloudflare Workers, a podloge i gotove rendere sprema u R2 bucket `4uha-
 - Uz podlogu ne slati dodatne slike (npr. Google Maps) — okolina se opisuje tekstom.
 - Ako API neki parametar ne prihvati, konektor pokuša blaže i to **izričito napiše** uz rezultat.
 - Kontrola geometrije prema podlozi i dalje je obavezna prije predaje.
+
+## Video (v1.2)
+
+- Radi samo s `XAI_API_KEY` (OpenAI je ukinuo Sora API 24. 9. 2026.). Model: `XAI_VIDEO_MODEL` u `wrangler.toml`.
+- Početna slika = prihvaćeni render; prompt: statična kamera, miču se samo ljudi, lišće, oblaci; zgrada i namještaj nepomični.
+- Video se prije predaje provjerava po kadrovima prema renderu (geometrija ne smije "plivati").
+- Trošak: po sekundi videa (xAI cjenik), npr. 8 s u 720p ≈ 1 $.
 
 ## Postavljanje (jednom)
 
