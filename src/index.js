@@ -9,12 +9,14 @@
 
 import { Buffer } from "node:buffer";
 
-const SERVER_INFO = { name: "4uha-render", version: "1.1.1" };
+const SERVER_INFO = { name: "4uha-render", version: "1.2.0" };
 const MAX_INLINE_B64 = 1_400_000; // veće slike Claudeu šaljemo samo kao link
 // "wide" = 16:9 kao ArchiCAD/Twinmotion podloge (1920x1080) — da model ne re-komponira kadar.
 const SIZES = { landscape: "1536x1024", portrait: "1024x1536", square: "1024x1024", wide: "2048x1152" };
 const XAI_ASPECT = { landscape: "3:2", portrait: "2:3", square: "1:1", wide: "16:9" };
 const MAX_B64_UPLOAD = 2_000_000; // upload_image: maske i manje slike iz Claudea
+const MAX_INLINE_VIDEO = 12_000_000; // video_status: do ~9 MB videa vraćamo i kao blob (base64)
+const VIDEO_RES = ["480p", "720p", "1080p"];
 
 export default {
   async fetch(request, env) {
@@ -93,6 +95,7 @@ function slug(s) {
 
 function extFromType(t) {
   if (!t) return "bin";
+  if (t.includes("mp4")) return "mp4";
   if (t.includes("png")) return "png";
   if (t.includes("jpeg") || t.includes("jpg")) return "jpg";
   if (t.includes("webp")) return "webp";
@@ -265,6 +268,44 @@ async function xaiRender(env, { prompt, refs, aspect, n }) {
   return note ? imgs.map((i) => ({ ...i, note })) : imgs;
 }
 
+// ---------- video (xAI Grok Imagine, image-to-video) ----------
+// Asinkrono: render_video pokreće posao i vraća job_id; video_status provjerava, a kad je gotovo
+// sprema MP4 u R2 (renders/<dan>/<oznaka>.mp4) i vraća trajni link.
+
+async function xaiVideoStart(env, { prompt, refUrl, ref, duration, resolution, aspect }) {
+  if (!env.XAI_API_KEY) throw new Error("XAI_API_KEY nije postavljen u Cloudflareu — video ide preko xAI-ja.");
+  const model = env.XAI_VIDEO_MODEL || "grok-imagine-video-1.5";
+  // Slika: javni link na naš /f/ (xAI ga sam dohvati); ako nije moguće, data URI.
+  const imageUrl = refUrl || `data:${ref.type};base64,${Buffer.from(ref.bytes).toString("base64")}`;
+  const body = { model, prompt, image: { url: imageUrl }, duration, resolution, aspect_ratio: XAI_ASPECT[aspect] || "16:9" };
+  const call = (payload) => fetch("https://api.x.ai/v1/videos/generations", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${cleanSecret(env.XAI_API_KEY)}`, "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  let note = null;
+  let res = await call(body);
+  if (res.status === 400 && refUrl && ref) {
+    // možda xAI ne može dohvatiti naš link — pokušaj s data URI
+    res = await call({ ...body, image: { url: `data:${ref.type};base64,${Buffer.from(ref.bytes).toString("base64")}` } });
+    note = "slika poslana kao data URI";
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`xAI video ${res.status}: ${data?.error?.message || data?.error || JSON.stringify(data).slice(0, 300)}`);
+  const id = data.request_id || data.id;
+  if (!id) throw new Error(`xAI nije vratio request_id: ${JSON.stringify(data).slice(0, 300)}`);
+  return { id, model, note };
+}
+
+async function xaiVideoPoll(env, id) {
+  const res = await fetch(`https://api.x.ai/v1/videos/${encodeURIComponent(id)}`, {
+    headers: { Authorization: `Bearer ${cleanSecret(env.XAI_API_KEY)}` },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`xAI video ${res.status}: ${data?.error?.message || data?.error || JSON.stringify(data).slice(0, 300)}`);
+  return data; // { status: "pending"|"done"|"failed"|"expired", video: { url, duration } }
+}
+
 async function toImage(d, fallbackType) {
   if (d.b64_json) return { b64: d.b64_json, type: sniffType(d.b64_json) || fallbackType };
   if (d.url) {
@@ -324,6 +365,37 @@ const TOOLS = [
     },
   },
   {
+    name: "render_video",
+    description:
+      "Pokreće AI video (image-to-video, xAI Grok Imagine) iz JEDNE slike — prihvaćenog rendera (renders/...) ili podloge. " +
+      "Za arhitekturu: kamera statična ili minimalan pomak, miču se samo ljudi, lišće, oblaci, voda; zgrada se NE mijenja — to izričito napiši u promptu. " +
+      "Asinkrono: vraća job_id; zatim zovi video_status dok nije gotovo (obično 1–5 min). Naplaćuje se po sekundi videa.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        prompt: { type: "string", description: "Što se miče i kako (na engleskom). Npr. 'Static camera. People at tables chat and sip coffee, one person walks across the deck, leaves sway gently. The building, frame and furniture stay perfectly still and unchanged.'" },
+        reference_id: { type: "string", description: "Početna slika: ključ/link ranijeg rendera (renders/...) ili ID uploada." },
+        duration: { type: "integer", minimum: 1, maximum: 15, default: 8, description: "Trajanje u sekundama (1–15)." },
+        resolution: { type: "string", enum: VIDEO_RES, default: "720p", description: "480p za brzu probu, 720p standard, 1080p ako ga model podržava (skuplje)." },
+        aspect: { type: "string", enum: ["landscape", "portrait", "square", "wide"], default: "wide", description: "Mora odgovarati slici; 'wide' = 16:9." },
+        label: { type: "string", description: "Oznaka za naziv datoteke, npr. A24-027_1_7_video." },
+      },
+      required: ["prompt", "reference_id"],
+    },
+  },
+  {
+    name: "video_status",
+    description: "Provjerava posao iz render_video (čeka do ~40 s). Kad je gotov, sprema MP4 i vraća trajni link; uz include_video=true vraća i sam video (base64) ako je manji od ~9 MB.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        job_id: { type: "string", description: "job_id iz render_video." },
+        include_video: { type: "boolean", default: true, description: "Vrati i sadržaj MP4-a (za pregled i kontrolu)." },
+      },
+      required: ["job_id"],
+    },
+  },
+  {
     name: "list_uploads",
     description: "Popis zadnjih uploadanih podloga (screenshotovi, skice) s ID-evima za render_image, i link na stranicu za upload.",
     inputSchema: { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 50, default: 10 } } },
@@ -355,6 +427,65 @@ async function callTool(name, args, env, base, token) {
     if (!type) throw new Error("Nepoznat format slike (podržano PNG/JPG/WEBP).");
     const { id, key } = await storeUpload(env, Buffer.from(b64, "base64"), type, String(args.name || `upload.${extFromType(type)}`), slug(args.label));
     return { content: [{ type: "text", text: `Spremljeno: ${id} | ${base}/f/${key}` }] };
+  }
+
+  if (name === "render_video") {
+    const prompt = String(args.prompt || "").trim();
+    if (!prompt) throw new Error("Prompt je obavezan.");
+    if (!args.reference_id) throw new Error("reference_id je obavezan (početna slika).");
+    const duration = Math.min(Math.max(parseInt(args.duration || 8, 10) || 8, 1), 15);
+    const resolution = VIDEO_RES.includes(args.resolution) ? args.resolution : "720p";
+    const aspect = XAI_ASPECT[args.aspect] ? args.aspect : "wide";
+    const ref = await resolveReference(env, args.reference_id);
+    const own = String(args.reference_id).trim().match(/\/f\/((?:renders|uploads)\/[^?#]+)$/);
+    let key = own ? own[1] : (/^(uploads|renders)\//.test(String(args.reference_id).trim()) ? String(args.reference_id).trim() : null);
+    if (!key && !/^https?:\/\//.test(String(args.reference_id))) {
+      const r = await env.RENDERS.list({ prefix: `uploads/${String(args.reference_id).trim()}` });
+      key = r.objects[0]?.key || null;
+    }
+    const refUrl = key ? `${base}/f/${key}` : (/^https?:\/\//.test(String(args.reference_id)) ? String(args.reference_id) : null);
+    const job = await xaiVideoStart(env, { prompt, refUrl, ref, duration, resolution, aspect });
+    const label = slug(args.label) || "video";
+    await env.RENDERS.put(`jobs/${job.id}.json`, JSON.stringify({
+      id: job.id, model: job.model, label, prompt, reference: args.reference_id, duration, resolution, aspect, started: new Date().toISOString(),
+    }), { httpMetadata: { contentType: "application/json" } });
+    return { content: [{ type: "text", text:
+      `Video pokrenut. job_id: ${job.id}\nModel: ${job.model} · ${duration} s · ${resolution} · ${XAI_ASPECT[aspect]}${job.note ? ` · ${job.note}` : ""}\n` +
+      `Pozovi video_status s ovim job_id (obično 1–5 min).` }] };
+  }
+
+  if (name === "video_status") {
+    const id = String(args.job_id || "").trim();
+    if (!id) throw new Error("job_id je obavezan.");
+    const metaObj = await env.RENDERS.get(`jobs/${id}.json`);
+    const meta = metaObj ? await metaObj.json() : { label: "video" };
+    if (meta.result) return videoResult(env, base, meta.result, args.include_video !== false, "već spremljeno");
+    let data;
+    for (let i = 0; i < 8; i++) {
+      data = await xaiVideoPoll(env, id);
+      if (data.status !== "pending" && data.status !== "processing" && data.status !== "queued") break;
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+    if (data.status !== "done") {
+      if (data.status === "failed" || data.status === "expired") {
+        return { content: [{ type: "text", text: `Video NIJE uspio (${data.status}): ${JSON.stringify(data).slice(0, 400)}` }], isError: true };
+      }
+      return { content: [{ type: "text", text: `Još se generira (status: ${data.status || "?"}). Pozovi video_status ponovno za ~30 s.` }] };
+    }
+    const vurl = data.video?.url || data.url;
+    if (!vurl) throw new Error(`Gotovo, ali bez linka na video: ${JSON.stringify(data).slice(0, 300)}`);
+    const vr = await fetch(vurl);
+    if (!vr.ok) throw new Error(`Ne mogu preuzeti video s xAI-ja (${vr.status}).`);
+    const bytes = new Uint8Array(await vr.arrayBuffer());
+    const day = new Date().toISOString().slice(0, 10);
+    const key = `renders/${day}/${meta.label}_xai_${crypto.randomUUID().slice(0, 8)}.mp4`;
+    await env.RENDERS.put(key, bytes, {
+      httpMetadata: { contentType: "video/mp4" },
+      customMetadata: { provider: "Grok video", prompt: String(meta.prompt || "").slice(0, 1500), refs: String(meta.reference || "") },
+    });
+    meta.result = { key, size: bytes.length, duration: data.video?.duration || meta.duration };
+    await env.RENDERS.put(`jobs/${id}.json`, JSON.stringify(meta), { httpMetadata: { contentType: "application/json" } });
+    return videoResult(env, base, meta.result, args.include_video !== false, null, bytes);
   }
 
   if (name === "render_image") {
@@ -409,6 +540,22 @@ async function callTool(name, args, env, base, token) {
   throw new Error(`Nepoznat alat: ${name}`);
 }
 
+async function videoResult(env, base, result, includeVideo, note, bytes) {
+  const link = `${base}/f/${result.key}`;
+  const content = [{ type: "text", text:
+    `Video gotov${note ? ` (${note})` : ""}: ${link}\nVeličina: ${(result.size / 1e6).toFixed(1)} MB${result.duration ? ` · ${result.duration} s` : ""}` }];
+  if (includeVideo) {
+    if (!bytes) { const o = await env.RENDERS.get(result.key); bytes = o ? new Uint8Array(await o.arrayBuffer()) : null; }
+    const b64 = bytes ? Buffer.from(bytes).toString("base64") : "";
+    if (b64 && b64.length <= MAX_INLINE_VIDEO) {
+      content.push({ type: "resource", resource: { uri: link, mimeType: "video/mp4", blob: b64 } });
+    } else if (b64) {
+      content.push({ type: "text", text: "Video je prevelik za prilog; koristi link." });
+    }
+  }
+  return { content };
+}
+
 // ---------- MCP (JSON-RPC preko HTTP-a) ----------
 
 async function handleMcp(request, env, base, token) {
@@ -438,7 +585,8 @@ async function handleRpc(msg, env, base, token) {
         instructions:
           "4 UHA alat za rendere. Za render iz podloge: korisnik uploada sliku na stranicu za upload (link daje list_uploads), " +
           "zatim render_image s reference_ids (SAMO podloga, aspect jednak podlozi — 'wide' za 16:9). Za zaključavanje zgrade: maska (upload_image → mask_id). " +
-          "Uvijek usporedi rezultat s podlogom i upozori na odstupanja geometrije; render s promijenjenom geometrijom se ne predaje.",
+          "Uvijek usporedi rezultat s podlogom i upozori na odstupanja geometrije; render s promijenjenom geometrijom se ne predaje. " +
+          "Video: render_video (iz prihvaćenog rendera, statična kamera, miču se samo ljudi/lišće/oblaci) → video_status dok nije gotovo; video provjeri po kadrovima prema renderu.",
       });
     case "ping":
       return ok({});
